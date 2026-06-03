@@ -1,0 +1,37 @@
+{
+  "name": "scan-secrets",
+  "version": "0.1.0",
+  "description": "Standalone secret scanner with pluggable detectors, inspired by gitleaks.",
+  "main": "dist/index.js",
+  "bin": {
+    "scan-secrets": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "scan": "node dist/index.js",
+    "start": "node dist/index.js"
+  },
+  "keywords": [
+    "secret",
+    "scan",
+    "gitleaks",
+    "security",
+    "entropy",
+    "rules"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "chalk": "^4.1.2",
+    "commander": "^12.0.0",
+    "fs-extra": "^11.2.0",
+    "yaml": "^2.4.2"
+  },
+  "devDependencies": {
+    "@types/fs-extra": "^11.0.4",
+    "@types/node": "^20.12.0",
+    "typescript": "^5.4.5"
+  }
+}
