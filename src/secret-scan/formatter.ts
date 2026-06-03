@@ -1,5 +1,6 @@
 import * as fs from 'fs-extra';
 import * as path from 'path';
+import packageJson from '../../package.json';
 import { c } from '../logger';
 import { SecretScanResult, ScanOutputOptions, SecretFinding } from './types';
 
@@ -147,8 +148,8 @@ export function toSarif(result: SecretScanResult) {
       {
         tool: {
           driver: {
-            name: 'ai-hub-secret-scan',
-            version: '1.0.0',
+            name: packageJson.name || 'scan-leaks',
+            version: packageJson.version || '0.1.0',
             rules,
           },
         },

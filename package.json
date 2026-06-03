@@ -1,13 +1,14 @@
 {
   "name": "scan-leaks",
   "version": "0.1.0",
-  "description": "Standalone secret leak scanner with pluggable detectors, inspired by gitleaks.",
+  "description": "Standalone secret leak scanner with built-in regex and entropy detectors.",
   "main": "dist/index.js",
   "bin": {
     "scan-leaks": "dist/index.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "test": "node --test tests/scan-case.test.mjs",
     "scan": "node dist/index.js",
     "start": "node dist/index.js"
   },
@@ -26,8 +27,7 @@
   "dependencies": {
     "chalk": "^4.1.2",
     "commander": "^12.0.0",
-    "fs-extra": "^11.2.0",
-    "yaml": "^2.4.2"
+    "fs-extra": "^11.2.0"
   },
   "devDependencies": {
     "@types/fs-extra": "^11.0.4",

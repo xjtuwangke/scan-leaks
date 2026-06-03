@@ -22,45 +22,18 @@ export interface SecretRuleConfig {
   entropy?: EntropyOptions;
 }
 
-export interface DetectorContext {
-  absolutePath: string;
-  relativePath: string;
-  rootPath: string;
-  content: string;
-  lines: string[];
-}
-
-export interface DetectorFinding {
-  rule_id?: string;
-  rule_name?: string;
-  severity?: RuleSeverity;
-  line?: number;
-  column?: number;
-  match?: string;
-  snippet?: string;
-  entropy?: number;
-  detector?: string;
-}
-
-export interface SecretDetectorPlugin {
-  id: string;
-  name?: string;
-  scan(context: DetectorContext): Promise<DetectorFinding[]> | DetectorFinding[];
-}
-
 export interface SecretScanConfig {
   rootPath: string;
-  rulesPath?: string | null;
   useDefaultRules: boolean;
   useGitIgnore: boolean;
   ignorePatterns: string[];
   maxFileSizeBytes: number;
   includeBinary: boolean;
   concurrency: number;
+  entropyThreshold?: number;
+  entropyWindowSize?: number;
   baselinePath?: string | null;
   cachePath?: string | null;
-  rulesDirs?: string[];
-  detectorPluginDirs?: string[];
   gitDiff?: {
     enabled: boolean;
     base?: string | null;

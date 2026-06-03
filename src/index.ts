@@ -10,10 +10,8 @@ const program = new Command();
 
 program
   .name('scan-leaks')
-  .description('Standalone secrets scanner with pluggable detectors')
+  .description('Standalone secrets scanner with built-in detectors')
   .option('-p, --path <path>', 'Target directory or file', process.cwd())
-  .option('-r, --rules <path>', 'Custom rule config file (json/yaml)')
-  .option('--no-default-rules', 'Disable built-in rule set')
   .option('--no-gitignore', 'Ignore .gitignore filtering')
   .option('-i, --ignore <pattern...>', 'Additional ignore patterns', [])
   .option('--max-size <bytes>', 'Maximum file size to scan', '1048576')
@@ -22,8 +20,6 @@ program
   .option('--git-diff [base]', 'Only scan git-changed files. Optionally provide base ref')
   .option('--no-git-diff-staged', 'Exclude staged files in git-diff mode')
   .option('--no-git-diff-untracked', 'Exclude untracked files in git-diff mode')
-  .option('--rules-dir <path...>', 'Load all rule files in directories', [])
-  .option('--plugin-dir <path...>', 'Load detector plugins from directories', [])
   .option('--baseline <path>', 'Baseline JSON to suppress known findings')
   .option('--cache', 'Enable incremental cache with default path')
   .option('--cache-path <path>', 'Enable cache with custom cache file path')
@@ -32,11 +28,30 @@ program
   .option('--format <name>', 'Output format name (summary/json/sarif)')
   .option('--output <path>', 'Write scan result to file')
   .option('--no-redact', 'Disable secret redaction in output')
-  .option('--strict', 'Fail when rule or plugin configuration errors are reported')
+  .option('--entropy-threshold <number>', 'Override entropy threshold for entropy-based rules')
+  .option('--entropy-window-size <number>', 'Override entropy window size for entropy-based rules')
+  .option('--strict', 'Fail when rule configuration errors are reported')
   .action(async (cmdOptions) => {
     try {
       const maxSize = Number.parseInt(cmdOptions.maxSize, 10);
       const concurrency = Number.parseInt(cmdOptions.concurrency, 10);
+      let entropyThreshold: number | undefined;
+      if (cmdOptions.entropyThreshold !== undefined) {
+        entropyThreshold = Number.parseFloat(cmdOptions.entropyThreshold);
+        if (!Number.isFinite(entropyThreshold) || entropyThreshold <= 0) {
+          c.error('--entropy-threshold must be a positive number');
+          process.exit(1);
+        }
+      }
+
+      let entropyWindowSize: number | undefined;
+      if (cmdOptions.entropyWindowSize !== undefined) {
+        entropyWindowSize = Number.parseInt(cmdOptions.entropyWindowSize, 10);
+        if (!Number.isFinite(entropyWindowSize) || entropyWindowSize <= 0) {
+          c.error('--entropy-window-size must be a positive integer');
+          process.exit(1);
+        }
+      }
 
       if (!Number.isFinite(maxSize) || maxSize <= 0) {
         c.error('--max-size must be a positive number');
@@ -57,8 +72,7 @@ program
       const cachePath = resolveCachePath(target, cmdOptions);
       const result = await runSecretScan({
         rootPath: target,
-        rulesPath: cmdOptions.rules,
-        useDefaultRules: cmdOptions.defaultRules,
+        useDefaultRules: true,
         useGitIgnore: cmdOptions.gitignore,
         ignorePatterns: cmdOptions.ignore || [],
         maxFileSizeBytes: maxSize,
@@ -74,8 +88,8 @@ program
           : {
             enabled: false,
         },
-        rulesDirs: cmdOptions.rulesDir || [],
-        detectorPluginDirs: cmdOptions.pluginDir || [],
+        entropyThreshold,
+        entropyWindowSize,
         baselinePath: cmdOptions.baseline ? path.resolve(cmdOptions.baseline) : null,
         cachePath,
       });

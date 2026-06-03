@@ -3,11 +3,9 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import YAML from 'yaml';
-import { DEFAULT_SECRET_RULES } from './default-rules';
+import { DEFAULT_SECRET_RULES } from './rules';
 import { calculateEntropy } from './entropy';
-import { DetectorContext, CompiledSecretRule, SecretDetectorPlugin, SecretFinding, SecretRuleConfig, SecretScanConfig, SecretScanResult } from './types';
-import { loadDetectorPlugins, runPluginDetectors } from './plugin-loader';
+import { CompiledSecretRule, SecretFinding, SecretRuleConfig, SecretScanConfig, SecretScanResult } from './types';
 
 const execFileAsync = promisify(execFile);
 
@@ -22,9 +20,10 @@ interface RuleWithRegex extends CompiledSecretRule {
   regex: RegExp;
 }
 
-const RULE_SEVERITIES = new Set(['critical', 'high', 'medium', 'low']);
-const RULE_TYPES = new Set(['regex', 'entropy']);
-const ENTROPY_CHARSETS = new Set(['base64', 'hex', 'alnum', 'any']);
+type IgnoreRule = {
+  regex: RegExp;
+  negate: boolean;
+};
 
 function toPosix(filePath: string): string {
   return filePath.split(path.sep).join('/');
@@ -81,6 +80,44 @@ function globToRegex(pattern: string): RegExp {
   return new RegExp(`^${body}$`);
 }
 
+function globToGitIgnoreRegex(pattern: string): RegExp {
+  const raw = pattern.trim();
+  if (!raw) {
+    return /$a/;
+  }
+  const anchored = raw.startsWith('/');
+  const directoryOnly = raw.endsWith('/');
+
+  const normalized = raw.replace(/^\/+|\/+$/g, '');
+  if (!normalized) {
+    return /$a/;
+  }
+
+  const body = globBody(normalized);
+  const hasSlash = normalized.includes('/');
+  let expr = '';
+
+  if (anchored) {
+    expr = `^${body}`;
+    expr += directoryOnly
+      ? '(?:/.*)?$'
+      : '$';
+    return new RegExp(expr);
+  }
+
+  if (hasSlash) {
+    if (directoryOnly) {
+      expr = `(^|/)${body}(?:/.*)?$`;
+    } else {
+      expr = `(^|/)${body}$`;
+    }
+    return new RegExp(expr);
+  }
+
+  expr = `(^|.*/)${body}(/.*)?$`;
+  return new RegExp(expr);
+}
+
 export function createFingerprint(ruleId: string, filePath: string, line: number, match: string): string {
   return crypto.createHash('sha1')
     .update(`${ruleId}|${filePath}|${line}|${match}`)
@@ -105,18 +142,13 @@ interface ScanCache {
   entries: Record<string, CachedScanEntry>;
 }
 
-interface PluginFileSignature {
-  path: string;
-  hash: string;
-}
-
-function makeScanSignature(config: SecretScanConfig, rules: SecretRuleConfig[], pluginFiles: PluginFileSignature[]): string {
+function makeScanSignature(config: SecretScanConfig, rules: SecretRuleConfig[]): string {
   return hashValue(JSON.stringify({
     scannerSchema: 2,
     useDefaultRules: config.useDefaultRules,
     baselinePath: config.baselinePath || null,
-    rulesDirs: (config.rulesDirs || []).slice().sort(),
-    pluginDirs: (config.detectorPluginDirs || []).slice().sort(),
+    entropyThreshold: config.entropyThreshold || null,
+    entropyWindowSize: config.entropyWindowSize || null,
     rulesCount: rules.length,
     rules: rules.map((rule) => ({
       id: rule.id,
@@ -130,7 +162,6 @@ function makeScanSignature(config: SecretScanConfig, rules: SecretRuleConfig[], 
       allowlist: rule.allowlist || [],
       entropy: rule.entropy || null,
     })),
-    pluginFiles,
   }));
 }
 
@@ -177,6 +208,38 @@ function compileRule(rule: SecretRuleConfig, errors: string[]): CompiledSecretRu
   }
 }
 
+function applyEntropyOverrides(
+  rule: SecretRuleConfig,
+  entropyThreshold?: number,
+  entropyWindowSize?: number,
+): SecretRuleConfig {
+  if (rule.type !== 'entropy' || !rule.entropy) {
+    return rule;
+  }
+
+  const entropy = { ...rule.entropy };
+  let changed = false;
+
+  if (typeof entropyThreshold === 'number' && Number.isFinite(entropyThreshold) && entropyThreshold > 0) {
+    entropy.entropy_threshold = entropyThreshold;
+    changed = true;
+  }
+
+  if (typeof entropyWindowSize === 'number' && Number.isFinite(entropyWindowSize) && entropyWindowSize > 0) {
+    entropy.window_size = entropyWindowSize;
+    changed = true;
+  }
+
+  if (!changed) {
+    return rule;
+  }
+
+  return {
+    ...rule,
+    entropy,
+  };
+}
+
 function hasKeyword(lineText: string, keywords?: string[]): boolean {
   if (!keywords || keywords.length === 0) return true;
   const lower = lineText.toLowerCase();
@@ -202,194 +265,6 @@ function getCharset(ruleConfig: SecretRuleConfig): string {
   return '';
 }
 
-async function collectRuleConfigFiles(dir: string, files: string[]): Promise<void> {
-  const entries = await fs.readdir(dir, { withFileTypes: true });
-  for (const entry of entries) {
-    const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      await collectRuleConfigFiles(fullPath, files);
-      continue;
-    }
-    if (!entry.isFile()) continue;
-    const lower = fullPath.toLowerCase();
-    if (lower.endsWith('.json') || lower.endsWith('.yml') || lower.endsWith('.yaml')) {
-      files.push(fullPath);
-    }
-  }
-}
-
-function normalizeRulePayload(raw: unknown): unknown[] {
-  if (!raw) return [];
-  if (Array.isArray(raw)) return raw;
-  if (Array.isArray((raw as { rules?: unknown[] }).rules)) {
-    return (raw as { rules: unknown[] }).rules;
-  }
-  return [];
-}
-
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((item) => typeof item === 'string');
-}
-
-function isPositiveNumber(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0;
-}
-
-function validateRuleConfig(raw: unknown, source: string, index: number, errors: string[]): SecretRuleConfig | null {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    errors.push(`Invalid rule in ${source} at index ${index}: expected object`);
-    return null;
-  }
-
-  const rule = raw as Record<string, unknown>;
-  const id = rule.id;
-  const name = rule.name;
-  const severity = rule.severity;
-  const type = rule.type ?? 'regex';
-  const pattern = rule.pattern;
-
-  const prefix = `Invalid rule ${typeof id === 'string' ? id : `<index ${index}>`} in ${source}`;
-  if (typeof id !== 'string' || id.trim().length === 0) {
-    errors.push(`${prefix}: id must be a non-empty string`);
-    return null;
-  }
-  if (typeof name !== 'string' || name.trim().length === 0) {
-    errors.push(`${prefix}: name must be a non-empty string`);
-    return null;
-  }
-  if (typeof severity !== 'string' || !RULE_SEVERITIES.has(severity)) {
-    errors.push(`${prefix}: severity must be one of critical/high/medium/low`);
-    return null;
-  }
-  if (typeof type !== 'string' || !RULE_TYPES.has(type)) {
-    errors.push(`${prefix}: type must be regex or entropy`);
-    return null;
-  }
-  if (typeof pattern !== 'string' || pattern.length === 0) {
-    errors.push(`${prefix}: pattern must be a non-empty string`);
-    return null;
-  }
-  if (rule.description !== undefined && typeof rule.description !== 'string') {
-    errors.push(`${prefix}: description must be a string`);
-    return null;
-  }
-  if (rule.flags !== undefined && typeof rule.flags !== 'string') {
-    errors.push(`${prefix}: flags must be a string`);
-    return null;
-  }
-  if (rule.keywords !== undefined && !isStringArray(rule.keywords)) {
-    errors.push(`${prefix}: keywords must be a string array`);
-    return null;
-  }
-  if (rule.paths !== undefined && !isStringArray(rule.paths)) {
-    errors.push(`${prefix}: paths must be a string array`);
-    return null;
-  }
-  if (rule.allowlist !== undefined && !isStringArray(rule.allowlist)) {
-    errors.push(`${prefix}: allowlist must be a string array`);
-    return null;
-  }
-  if (rule.entropy !== undefined) {
-    if (!rule.entropy || typeof rule.entropy !== 'object' || Array.isArray(rule.entropy)) {
-      errors.push(`${prefix}: entropy must be an object`);
-      return null;
-    }
-    const entropy = rule.entropy as Record<string, unknown>;
-    if (entropy.enabled !== undefined && typeof entropy.enabled !== 'boolean') {
-      errors.push(`${prefix}: entropy.enabled must be boolean`);
-      return null;
-    }
-    for (const key of ['min_length', 'window_size', 'entropy_threshold']) {
-      if (entropy[key] !== undefined && !isPositiveNumber(entropy[key])) {
-        errors.push(`${prefix}: entropy.${key} must be a positive number`);
-        return null;
-      }
-    }
-    if (entropy.charset !== undefined && (typeof entropy.charset !== 'string' || !ENTROPY_CHARSETS.has(entropy.charset))) {
-      errors.push(`${prefix}: entropy.charset must be one of base64/hex/alnum/any`);
-      return null;
-    }
-  }
-
-  return rule as unknown as SecretRuleConfig;
-}
-
-async function loadRuleConfig(rulePath?: string | null, errors?: string[]): Promise<SecretRuleConfig[]> {
-  if (!rulePath) return [];
-  try {
-    const data = await fs.readFile(rulePath, 'utf8');
-    const lower = rulePath.toLowerCase();
-    const raw = lower.endsWith('.yaml') || lower.endsWith('.yml') ? YAML.parse(data) : JSON.parse(data);
-    return normalizeRulePayload(raw)
-      .map((rule, index) => validateRuleConfig(rule, rulePath, index, errors || []))
-      .filter((rule): rule is SecretRuleConfig => Boolean(rule));
-  } catch (error) {
-    errors?.push(`Failed to load rule config ${rulePath}: ${error}`);
-    return [];
-  }
-}
-
-async function loadRuleConfigsFromDirs(ruleDirs: string[] | undefined, errors?: string[]): Promise<SecretRuleConfig[]> {
-  if (!ruleDirs || ruleDirs.length === 0) return [];
-  const allRuleFiles: string[] = [];
-
-  for (const rawDir of ruleDirs) {
-    const dir = path.resolve(rawDir);
-    if (!(await fs.pathExists(dir))) {
-      errors?.push(`Rule directory not found: ${dir}`);
-      continue;
-    }
-    await collectRuleConfigFiles(dir, allRuleFiles);
-  }
-
-  const allRules: SecretRuleConfig[] = [];
-  for (const filePath of allRuleFiles) {
-    const rules = await loadRuleConfig(filePath, errors);
-    allRules.push(...rules);
-  }
-  return allRules;
-}
-
-async function collectPluginSignatureFiles(dir: string, files: string[]): Promise<void> {
-  const entries = await fs.readdir(dir, { withFileTypes: true });
-  for (const entry of entries) {
-    const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      await collectPluginSignatureFiles(fullPath, files);
-      continue;
-    }
-    if (!entry.isFile()) continue;
-    const lower = fullPath.toLowerCase();
-    if (lower.endsWith('.js') || lower.endsWith('.mjs') || lower.endsWith('.cjs')) {
-      files.push(fullPath);
-    }
-  }
-}
-
-async function loadPluginFileSignatures(pluginDirs: string[] | undefined, errors?: string[]): Promise<PluginFileSignature[]> {
-  if (!pluginDirs || pluginDirs.length === 0) return [];
-  const files: string[] = [];
-  for (const rawDir of pluginDirs) {
-    const pluginDir = path.resolve(rawDir);
-    if (!(await fs.pathExists(pluginDir))) continue;
-    await collectPluginSignatureFiles(pluginDir, files);
-  }
-
-  const signatures: PluginFileSignature[] = [];
-  for (const filePath of files.sort()) {
-    try {
-      const content = await fs.readFile(filePath);
-      signatures.push({
-        path: filePath,
-        hash: crypto.createHash('sha1').update(content).digest('hex'),
-      });
-    } catch (error) {
-      errors?.push(`Failed to read detector plugin for cache signature ${filePath}: ${error}`);
-    }
-  }
-  return signatures;
-}
-
 async function isBinaryFile(filePath: string): Promise<boolean> {
   const sample = await fs.readFile(filePath);
   const sampleLength = Math.min(sample.length, 8192);
@@ -401,9 +276,11 @@ async function isBinaryFile(filePath: string): Promise<boolean> {
 
 function compileIgnoreMatcher(basePath: string, useGitIgnore: boolean, extraPatterns: string[]): { test: (target: string) => boolean } {
   const defaultPatterns = ['.git', '.gitignore', '.idea', '.vscode', 'node_modules', 'dist', 'build', 'coverage', 'tmp', 'out'];
-  const patterns = [...defaultPatterns, ...extraPatterns];
-  const regexps = patterns.map(globToRegex);
-  const gitignorePatterns: RegExp[] = [];
+  const rules: IgnoreRule[] = defaultPatterns.map((pattern) => ({ regex: globToRegex(pattern), negate: false }));
+  for (const extraPattern of extraPatterns) {
+    if (!extraPattern) continue;
+    rules.push({ regex: globToRegex(extraPattern), negate: false });
+  }
   if (useGitIgnore) {
     const gitignorePath = path.join(basePath, '.gitignore');
     if (fs.pathExistsSync(gitignorePath)) {
@@ -411,15 +288,23 @@ function compileIgnoreMatcher(basePath: string, useGitIgnore: boolean, extraPatt
       for (const rawLine of lines) {
         const trimmed = rawLine.trim();
         if (!trimmed || trimmed.startsWith('#')) continue;
-        if (trimmed.startsWith('!')) continue;
-        gitignorePatterns.push(globToRegex(trimmed));
+        const negate = trimmed.startsWith('!');
+        const pattern = negate ? trimmed.slice(1).trim() : trimmed;
+        if (!pattern) continue;
+        rules.push({ regex: globToGitIgnoreRegex(pattern), negate });
       }
     }
   }
 
   return {
     test: (target: string): boolean => {
-      return [...regexps, ...gitignorePatterns].some((pattern) => pattern.test(target));
+      let matched = false;
+      for (const rule of rules) {
+        if (rule.regex.test(target)) {
+          matched = !rule.negate;
+        }
+      }
+      return matched;
     },
   };
 }
@@ -586,12 +471,16 @@ function buildFindingsFromEntropy(
   if (!rule.config.entropy || !rule.config.entropy.enabled) return;
   const minLength = rule.config.entropy.min_length || 20;
   const threshold = rule.config.entropy.entropy_threshold || 4.5;
+  const configuredWindowSize = rule.config.entropy.window_size;
+  const hasWindowSize = typeof configuredWindowSize === 'number' && Number.isFinite(configuredWindowSize) && configuredWindowSize > 0;
+  const windowSize = hasWindowSize ? Math.max(configuredWindowSize, minLength) : 0;
   const charset = getCharset(rule.config);
   const line = context.lineText;
   rule.regex.lastIndex = 0;
   let match = rule.regex.exec(line);
   while (match) {
     const value = match[0];
+    const matchStart = match.index || 0;
     if (value.length < minLength) {
       match = rule.regex.exec(line);
       continue;
@@ -600,22 +489,36 @@ function buildFindingsFromEntropy(
       match = rule.regex.exec(line);
       continue;
     }
-    const entropy = calculateEntropy(value, charset);
-    if (entropy >= threshold) {
-      const column = context.lineOffset + (match.index || 0) + 1;
+
+    const emitEntropyFinding = (candidate: string, columnOffset: number): void => {
+      if (candidate.length < minLength) return;
+      const entropy = calculateEntropy(candidate, charset);
+      if (entropy < threshold) return;
       findings.push({
         rule_id: rule.config.id,
         rule_name: rule.config.name,
         severity: rule.config.severity,
         path: context.path,
         line: context.line,
-        column,
-        match: value,
+        column: context.lineOffset + matchStart + columnOffset + 1,
+        match: candidate,
         snippet: line,
-        fingerprint: createFingerprint(rule.config.id, context.path, context.line, value),
+        fingerprint: createFingerprint(rule.config.id, context.path, context.line, candidate),
         entropy,
         detector: 'entropy',
       });
+    };
+
+    if (hasWindowSize && value.length >= windowSize) {
+      if (value.length === windowSize) {
+        emitEntropyFinding(value, 0);
+      } else {
+        for (let windowStart = 0; windowStart <= value.length - windowSize; windowStart += 1) {
+          emitEntropyFinding(value.slice(windowStart, windowStart + windowSize), windowStart);
+        }
+      }
+    } else {
+      emitEntropyFinding(value, 0);
     }
     if (value.length === 0) {
       rule.regex.lastIndex += 1;
@@ -628,7 +531,6 @@ async function scanFile(
   filePath: string,
   rootPath: string,
   rules: RuleWithRegex[],
-  plugins: SecretDetectorPlugin[],
   content: string,
   lines: string[],
   errors: string[],
@@ -656,12 +558,6 @@ async function scanFile(
     }
   }
 
-  if (plugins.length > 0) {
-    const detectorContext: DetectorContext = { absolutePath: filePath, relativePath, rootPath, content, lines };
-    const pluginFindings = await runPluginDetectors(detectorContext, plugins, errors);
-    findings.push(...pluginFindings);
-  }
-
   return findings;
 }
 
@@ -674,7 +570,6 @@ async function scanFileWithCache(
   filePath: string,
   rootPath: string,
   rules: RuleWithRegex[],
-  plugins: SecretDetectorPlugin[],
   baseline: Set<string>,
   cache: ScanCache | null,
   signature: string,
@@ -710,7 +605,7 @@ async function scanFileWithCache(
     };
   }
 
-  const findings = await scanFile(filePath, rootPath, rules, plugins, content, content.split('\n'), errors);
+  const findings = await scanFile(filePath, rootPath, rules, content, content.split('\n'), errors);
   if (useCache && cache) {
     cache.entries[relativePath] = {
       mtimeMs: stat.mtimeMs,
@@ -734,23 +629,20 @@ export async function runSecretScan(config: SecretScanConfig): Promise<SecretSca
   const rootPath = isSingleFile ? path.dirname(scanTarget) : scanTarget;
   const warnings: string[] = [];
   const errors: string[] = [];
-  const rawRules = [
-    ...(config.useDefaultRules ? DEFAULT_SECRET_RULES : []),
-    ...(await loadRuleConfig(config.rulesPath || null, errors)),
-    ...(await loadRuleConfigsFromDirs(config.rulesDirs || [], errors)),
-  ];
+  const rawRules = config.useDefaultRules
+    ? DEFAULT_SECRET_RULES.map((rule) => applyEntropyOverrides(
+      rule,
+      config.entropyThreshold,
+      config.entropyWindowSize,
+    ))
+    : [];
 
   const compiledRules = rawRules
     .map((rule) => compileRule(rule, errors))
     .filter((rule): rule is RuleWithRegex => Boolean(rule && rule.regex));
-  const pluginFileSignatures = await loadPluginFileSignatures(config.detectorPluginDirs || [], errors);
-  const signature = makeScanSignature(config, rawRules, pluginFileSignatures);
+  const signature = makeScanSignature(config, rawRules);
   const ignore = compileIgnoreMatchers(rootPath, config.useGitIgnore, config.ignorePatterns);
   const baseline = await loadBaselineFingerprints(config.baselinePath || null);
-  const pluginLoadResult = await loadDetectorPlugins(config.detectorPluginDirs || []);
-  const plugins = pluginLoadResult.plugins;
-  warnings.push(...pluginLoadResult.warnings);
-  errors.push(...pluginLoadResult.errors);
   const useCache = Boolean(config.cachePath);
   const cachePath = defaultCachePath(config, rootPath);
   const cache = await loadScanCache(cachePath);
@@ -761,12 +653,6 @@ export async function runSecretScan(config: SecretScanConfig): Promise<SecretSca
     Boolean(normalizedCachePath) && path.resolve(filePath) === normalizedCachePath
   );
 
-  if (plugins.length > 0) {
-    warnings.push(`Loaded ${plugins.length} detector plugin(s)`);
-  }
-  if (config.rulesDirs && config.rulesDirs.length > 0) {
-    warnings.push(`Loaded rule directory: ${config.rulesDirs.join(', ')}`);
-  }
   if (useCache) {
     if (cache) {
       if (cache.signature && cache.signature !== signature) {
@@ -809,7 +695,6 @@ export async function runSecretScan(config: SecretScanConfig): Promise<SecretSca
         filePath,
         rootPath,
         compiledRules,
-        plugins,
         baseline,
         useCache ? cache : null,
         signature,

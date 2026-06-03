@@ -13,10 +13,11 @@ export function calculateEntropy(value: string, alphabet: string): number {
     entropy -= frequency * Math.log2(frequency);
   }
 
-  if (alphabet && alphabet.length > 1) {
-    const maxEntropy = Math.log2(Math.min(alphabet.length, Object.keys(buckets).length));
-    return Math.min(entropy, maxEntropy || entropy);
+  const alphabetSize = alphabet ? alphabet.length : 0;
+  if (alphabetSize <= 1) {
+    return entropy;
   }
 
-  return entropy;
+  const maxEntropy = Math.log2(alphabetSize);
+  return Math.min(entropy, maxEntropy || entropy);
 }
