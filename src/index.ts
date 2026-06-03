@@ -9,7 +9,7 @@ import { c } from './logger';
 const program = new Command();
 
 program
-  .name('scan-secrets')
+  .name('scan-leaks')
   .description('Standalone secrets scanner with pluggable detectors')
   .option('-p, --path <path>', 'Target directory or file', process.cwd())
   .option('-r, --rules <path>', 'Custom rule config file (json/yaml)')
@@ -95,7 +95,7 @@ program
         process.exitCode = 2;
       }
     } catch (error) {
-      c.error(`scan-secrets failed: ${error}`);
+      c.error(`scan-leaks failed: ${error}`);
       process.exit(1);
     }
   });

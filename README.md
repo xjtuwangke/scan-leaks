@@ -1,11 +1,11 @@
-# scan-secrets
+# scan-leaks
 
 独立的秘密信息扫描工具，支持规则引擎 + entropy 高熵规则 + 插件探测器。
 
 ## 快速开始
 
 ```bash
-cd ~/work/scan-secrets
+cd ~/work/scan-leaks
 npm install
 npm run build
 node dist/index.js --help
@@ -46,7 +46,7 @@ node dist/index.js --strict
 
 - `npm run scan -- <args>`：运行扫描
 - `node dist/index.js <args>`：直接运行编译产物
-- `bin/scan-secrets`：发布后可直接执行（`npm link` 后可用）
+- `bin/scan-leaks`：发布后可直接执行（`npm link` 后可用）
 
 ## 规则与插件示例
 

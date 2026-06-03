@@ -1,4 +1,4 @@
-// Example custom detector plugin for scan-secrets
+// Example custom detector plugin for scan-leaks
 // Exports one detector for all files under this directory.
 
 function scan(context) {

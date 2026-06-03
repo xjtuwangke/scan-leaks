@@ -1,10 +1,10 @@
 {
-  "name": "scan-secrets",
+  "name": "scan-leaks",
   "version": "0.1.0",
-  "description": "Standalone secret scanner with pluggable detectors, inspired by gitleaks.",
+  "description": "Standalone secret leak scanner with pluggable detectors, inspired by gitleaks.",
   "main": "dist/index.js",
   "bin": {
-    "scan-secrets": "dist/index.js"
+    "scan-leaks": "dist/index.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
